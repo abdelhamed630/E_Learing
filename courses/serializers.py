@@ -175,3 +175,32 @@ class CreateCourseReviewSerializer(serializers.ModelSerializer):
         if value < 1 or value > 5:
             raise serializers.ValidationError("التقييم يجب أن يكون بين 1 و 5")
         return value
+
+
+class InstructorCourseSerializer(serializers.ModelSerializer):
+    """Serializer للمدرب - إنشاء وتعديل الكورسات"""
+    category_detail = CategorySerializer(source='category', read_only=True)
+    instructor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Course
+        fields = [
+            'id', 'title', 'slug', 'description', 'category', 'category_detail',
+            'instructor', 'instructor_name', 'level', 'language',
+            'price', 'discount_price', 'duration_hours',
+            'requirements', 'what_will_learn', 'trailer_url',
+            'thumbnail', 'is_published', 'is_featured',
+            'students_count', 'rating', 'views_count',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'slug', 'instructor', 'students_count',
+            'rating', 'views_count', 'created_at', 'updated_at',
+        ]
+
+    def get_instructor_name(self, obj):
+        return obj.instructor.get_full_name() or obj.instructor.username
+
+    def create(self, validated_data):
+        validated_data['instructor'] = self.context['request'].user
+        return super().create(validated_data)

@@ -13,7 +13,8 @@ from enrollments.models import Enrollment, VideoProgress
 from .models import Category, Course, Video, CourseReview, Section
 from .serializers import (
     CategorySerializer, CourseListSerializer, CourseDetailSerializer,
-    VideoSerializer, CourseReviewSerializer, CreateCourseReviewSerializer
+    VideoSerializer, CourseReviewSerializer, CreateCourseReviewSerializer,
+    InstructorCourseSerializer
 )
 from .tasks import update_course_rating, increment_video_views
 
@@ -158,3 +159,37 @@ class VideoViewSet(viewsets.ReadOnlyModelViewSet):
         increment_video_views.delay(video.id)
         serializer = self.get_serializer(video)
         return Response(serializer.data)
+
+
+class InstructorCourseViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet للمدرب - إنشاء وتعديل وحذف كورساته فقط
+    """
+    serializer_class = None
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['is_published', 'level', 'language', 'category']
+    search_fields = ['title', 'description']
+    ordering = ['-created_at']
+
+    def get_serializer_class(self):
+        from .serializers import InstructorCourseSerializer
+        return InstructorCourseSerializer
+
+    def get_queryset(self):
+        # المدرب يشوف كورساته بس (منشورة ومسودة)
+        return Course.objects.filter(
+            instructor=self.request.user
+        ).select_related('category', 'instructor').order_by('-created_at')
+
+    def perform_create(self, serializer):
+        serializer.save(instructor=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        course = self.get_object()
+        if course.students_count > 0:
+            return Response(
+                {'error': 'لا يمكن حذف كورس فيه طلاب مسجلين'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
