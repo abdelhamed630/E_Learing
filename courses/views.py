@@ -193,3 +193,105 @@ class InstructorCourseViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         return super().destroy(request, *args, **kwargs)
+
+
+class InstructorContentViewSet(viewsets.ViewSet):
+    """إدارة محتوى الكورس - أقسام وفيديوهات"""
+    permission_classes = [IsAuthenticated]
+
+    def get_course(self, pk):
+        try:
+            return Course.objects.get(pk=pk, instructor=self.request.user)
+        except Course.DoesNotExist:
+            return None
+
+    # ── GET /instructor-content/{course_id}/ ── جلب كل المحتوى
+    def retrieve(self, request, pk=None):
+        course = self.get_course(pk)
+        if not course:
+            return Response({'error': 'الكورس غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+        from .serializers import SectionWriteSerializer, VideoReadSerializer
+        sections = Section.objects.filter(course=course).prefetch_related('videos').order_by('order')
+        # فيديوهات بدون قسم
+        loose = Video.objects.filter(course=course, section=None).order_by('order')
+        return Response({
+            'course_id': course.id,
+            'course_title': course.title,
+            'sections': SectionWriteSerializer(sections, many=True).data,
+            'loose_videos': VideoReadSerializer(loose, many=True).data,
+        })
+
+    # ── POST /instructor-content/{course_id}/sections/ ── إضافة قسم
+    @action(detail=True, methods=['post'], url_path='sections')
+    def add_section(self, request, pk=None):
+        course = self.get_course(pk)
+        if not course:
+            return Response({'error': 'الكورس غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+        from .serializers import SectionWriteSerializer
+        order = Section.objects.filter(course=course).count()
+        section = Section.objects.create(
+            course=course,
+            title=request.data.get('title', 'قسم جديد'),
+            description=request.data.get('description', ''),
+            order=request.data.get('order', order),
+        )
+        return Response(SectionWriteSerializer(section).data, status=status.HTTP_201_CREATED)
+
+    # ── PATCH/DELETE /instructor-content/{course_id}/sections/{section_id}/ ── تعديل/حذف قسم
+    @action(detail=True, methods=['patch', 'delete'], url_path='sections/(?P<section_id>[^/.]+)')
+    def manage_section(self, request, pk=None, section_id=None):
+        course = self.get_course(pk)
+        if not course:
+            return Response({'error': 'الكورس غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            section = Section.objects.get(id=section_id, course=course)
+        except Section.DoesNotExist:
+            return Response({'error': 'القسم غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+        if request.method == 'DELETE':
+            section.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        from .serializers import SectionWriteSerializer
+        for k, v in request.data.items():
+            setattr(section, k, v)
+        section.save()
+        return Response(SectionWriteSerializer(section).data)
+
+    # ── POST /instructor-content/{course_id}/videos/ ── إضافة فيديو
+    @action(detail=True, methods=['post'], url_path='videos')
+    def add_video(self, request, pk=None):
+        course = self.get_course(pk)
+        if not course:
+            return Response({'error': 'الكورس غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+        from .serializers import VideoWriteSerializer, VideoReadSerializer
+        data = {**request.data, 'course': course.id}
+        # تحويل duration من دقائق لثواني لو أرسل بالدقائق
+        if 'duration_minutes' in request.data:
+            data['duration'] = int(request.data['duration_minutes']) * 60
+        order = Video.objects.filter(course=course).count()
+        serializer = VideoWriteSerializer(data=request.data)
+        if serializer.is_valid():
+            video = serializer.save(course=course, order=request.data.get('order', order))
+            return Response(VideoReadSerializer(video).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # ── PATCH/DELETE /instructor-content/{course_id}/videos/{video_id}/ ── تعديل/حذف فيديو
+    @action(detail=True, methods=['patch', 'delete'], url_path='videos/(?P<video_id>[^/.]+)')
+    def manage_video(self, request, pk=None, video_id=None):
+        course = self.get_course(pk)
+        if not course:
+            return Response({'error': 'الكورس غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            video = Video.objects.get(id=video_id, course=course)
+        except Video.DoesNotExist:
+            return Response({'error': 'الفيديو غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+        if request.method == 'DELETE':
+            video.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        from .serializers import VideoReadSerializer
+        for k, v in request.data.items():
+            if k == 'duration_minutes':
+                video.duration = int(v) * 60
+            elif hasattr(video, k):
+                setattr(video, k, v)
+        video.save()
+        return Response(VideoReadSerializer(video).data)

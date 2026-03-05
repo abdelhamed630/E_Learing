@@ -204,3 +204,37 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data['instructor'] = self.context['request'].user
         return super().create(validated_data)
+
+
+# ═══════════════════════════════════════════════════
+#  Serializers لإدارة المحتوى - للمدرب
+# ═══════════════════════════════════════════════════
+
+class VideoWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Video
+        fields = [
+            'id', 'title', 'description', 'video_url',
+            'duration', 'order', 'is_free', 'is_downloadable', 'section'
+        ]
+        read_only_fields = ['id']
+
+class VideoReadSerializer(serializers.ModelSerializer):
+    duration_formatted = serializers.SerializerMethodField()
+    class Meta:
+        model = Video
+        fields = [
+            'id', 'title', 'description', 'video_url',
+            'duration', 'duration_formatted', 'order',
+            'is_free', 'is_downloadable', 'views_count',
+            'section', 'created_at'
+        ]
+    def get_duration_formatted(self, obj):
+        return obj.duration_formatted
+
+class SectionWriteSerializer(serializers.ModelSerializer):
+    videos = VideoReadSerializer(many=True, read_only=True)
+    class Meta:
+        model = Section
+        fields = ['id', 'title', 'description', 'order', 'videos']
+        read_only_fields = ['id']
