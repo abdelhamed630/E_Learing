@@ -3,6 +3,7 @@ Views للامتحانات
 الطالب: يحل الامتحانات فقط - لا ينشئ ولا يعدل
 """
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -310,3 +311,83 @@ class ExamViewSet(viewsets.ReadOnlyModelViewSet):
         }
 
         return Response(stats)
+
+
+class InstructorExamViewSet(viewsets.ModelViewSet):
+    """ViewSet للمدرب - إدارة الامتحانات كاملة"""
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        from .serializers import InstructorExamSerializer
+        return InstructorExamSerializer
+
+    def get_queryset(self):
+        return Exam.objects.filter(
+            course__instructor=self.request.user
+        ).select_related('course').prefetch_related(
+            'questions__answers', 'attempts'
+        ).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        serializer.save()
+
+    # ── إضافة سؤال لامتحان ──
+    @action(detail=True, methods=['post'], url_path='questions')
+    def add_question(self, request, pk=None):
+        from .serializers import QuestionWriteSerializer
+        exam = self.get_object()
+        data = {**request.data, 'exam': exam.id}
+        serializer = QuestionWriteSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            question = serializer.save(exam=exam)
+            from .serializers import QuestionSerializer
+            return Response(QuestionSerializer(question).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # ── تعديل سؤال ──
+    @action(detail=True, methods=['patch', 'delete'], url_path='questions/(?P<question_id>[^/.]+)')
+    def manage_question(self, request, pk=None, question_id=None):
+        exam = self.get_object()
+        try:
+            question = Question.objects.get(id=question_id, exam=exam)
+        except Question.DoesNotExist:
+            return Response({'error': 'السؤال غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.method == 'DELETE':
+            question.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        from .serializers import QuestionWriteSerializer
+        serializer = QuestionWriteSerializer(question, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            from .serializers import QuestionSerializer
+            return Response(QuestionSerializer(question).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # ── نتائج الطلاب في امتحان ──
+    @action(detail=True, methods=['get'], url_path='results')
+    def results(self, request, pk=None):
+        from .serializers import InstructorAttemptSerializer
+        exam = self.get_object()
+        attempts = ExamAttempt.objects.filter(
+            exam=exam
+        ).exclude(status='in_progress').select_related(
+            'student__user'
+        ).prefetch_related('student_answers__selected_answers', 'student_answers__question__answers').order_by('-score')
+        serializer = InstructorAttemptSerializer(attempts, many=True)
+        return Response(serializer.data)
+
+    # ── تفاصيل محاولة طالب ──
+    @action(detail=True, methods=['get'], url_path='results/(?P<attempt_id>[^/.]+)')
+    def attempt_detail(self, request, pk=None, attempt_id=None):
+        from .serializers import InstructorAttemptSerializer
+        exam = self.get_object()
+        try:
+            attempt = ExamAttempt.objects.get(
+                id=attempt_id, exam=exam
+            ).select_related('student__user')
+        except ExamAttempt.DoesNotExist:
+            return Response({'error': 'المحاولة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = InstructorAttemptSerializer(attempt)
+        return Response(serializer.data)

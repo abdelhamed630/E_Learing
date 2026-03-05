@@ -183,3 +183,104 @@ class ExamResultSerializer(ExamAttemptSerializer):
 
     def get_wrong_count(self, obj):
         return obj.student_answers.filter(is_correct=False).count()
+
+
+# ═══════════════════════════════════════════════════
+#  Serializers للمدرب
+# ═══════════════════════════════════════════════════
+
+class AnswerWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Answer
+        fields = ['id', 'answer_text', 'is_correct', 'order']
+
+class QuestionWriteSerializer(serializers.ModelSerializer):
+    answers = AnswerWriteSerializer(many=True)
+
+    class Meta:
+        model = Question
+        fields = ['id', 'question_text', 'question_type', 'points', 'order', 'explanation', 'answers']
+
+    def create(self, validated_data):
+        answers_data = validated_data.pop('answers', [])
+        question = Question.objects.create(**validated_data)
+        for i, ans in enumerate(answers_data):
+            ans['order'] = ans.get('order', i)
+            Answer.objects.create(question=question, **ans)
+        return question
+
+    def update(self, instance, validated_data):
+        answers_data = validated_data.pop('answers', None)
+        for attr, val in validated_data.items():
+            setattr(instance, attr, val)
+        instance.save()
+        if answers_data is not None:
+            instance.answers.all().delete()
+            for i, ans in enumerate(answers_data):
+                ans['order'] = ans.get('order', i)
+                Answer.objects.create(question=instance, **ans)
+        return instance
+
+
+class InstructorExamSerializer(serializers.ModelSerializer):
+    questions = QuestionSerializer(many=True, read_only=True)
+    total_questions = serializers.IntegerField(source='total_questions', read_only=True)
+    total_points = serializers.IntegerField(source='total_points', read_only=True)
+    attempts_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Exam
+        fields = [
+            'id', 'course', 'title', 'description', 'instructions',
+            'status', 'duration', 'passing_score', 'max_attempts',
+            'shuffle_questions', 'shuffle_answers',
+            'show_result_immediately', 'show_correct_answers', 'allow_review',
+            'total_questions', 'total_points', 'attempts_count',
+            'created_at', 'updated_at', 'questions',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_attempts_count(self, obj):
+        return obj.attempts.exclude(status='in_progress').count()
+
+    def validate_course(self, value):
+        request = self.context.get('request')
+        if request and value.instructor != request.user:
+            raise serializers.ValidationError("هذا الكورس لا يخصك")
+        return value
+
+
+class InstructorAttemptSerializer(serializers.ModelSerializer):
+    """نتائج محاولات الطلاب - للمدرب"""
+    student_name = serializers.SerializerMethodField()
+    student_email = serializers.SerializerMethodField()
+    exam_title = serializers.CharField(source='exam.title', read_only=True)
+    correct_count = serializers.SerializerMethodField()
+    wrong_count = serializers.SerializerMethodField()
+    total_questions = serializers.SerializerMethodField()
+    student_answers = StudentAnswerSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ExamAttempt
+        fields = [
+            'id', 'student_name', 'student_email', 'exam_title',
+            'status', 'score', 'points_earned', 'passed',
+            'started_at', 'submitted_at', 'attempt_number',
+            'correct_count', 'wrong_count', 'total_questions',
+            'student_answers',
+        ]
+
+    def get_student_name(self, obj):
+        return obj.student.user.get_full_name() or obj.student.user.username
+
+    def get_student_email(self, obj):
+        return obj.student.user.email
+
+    def get_correct_count(self, obj):
+        return obj.student_answers.filter(is_correct=True).count()
+
+    def get_wrong_count(self, obj):
+        return obj.student_answers.filter(is_correct=False).count()
+
+    def get_total_questions(self, obj):
+        return obj.exam.total_questions
