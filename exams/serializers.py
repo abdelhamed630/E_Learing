@@ -26,8 +26,8 @@ class QuestionSerializer(serializers.ModelSerializer):
 
 class ExamSerializer(serializers.ModelSerializer):
     """Serializer للامتحان (قائمة)"""
-    total_questions = serializers.IntegerField(source='total_questions', read_only=True)
-    total_points = serializers.IntegerField(source='total_points', read_only=True)
+    total_questions = serializers.IntegerField(read_only=True)
+    total_points = serializers.IntegerField(read_only=True)
     attempts_used = serializers.SerializerMethodField()
     attempts_left = serializers.SerializerMethodField()
     best_score = serializers.SerializerMethodField()
@@ -130,21 +130,20 @@ class StudentAnswerSerializer(serializers.ModelSerializer):
         ]
 
     def get_correct_answers(self, obj):
-        """إظهار الإجابات الصحيحة بعد التسليم"""
-        attempt = obj.attempt
-        if (attempt.status == 'graded' and attempt.exam.show_correct_answers):
+        """إظهار الإجابات الصحيحة دائماً بعد التصحيح"""
+        if obj.attempt.status == 'graded':
             answers = obj.question.answers.filter(is_correct=True)
             return AnswerSerializer(answers, many=True).data
-        return None
+        return []
 
 
 class ExamAttemptSerializer(serializers.ModelSerializer):
     """Serializer لمحاولة الامتحان"""
     exam_title = serializers.CharField(source='exam.title', read_only=True)
     course_title = serializers.CharField(source='exam.course.title', read_only=True)
-    time_remaining = serializers.IntegerField(source='time_remaining', read_only=True)
-    duration_taken = serializers.IntegerField(source='duration_taken', read_only=True)
-    is_expired = serializers.BooleanField(source='is_expired', read_only=True)
+    time_remaining = serializers.IntegerField(read_only=True)
+    duration_taken = serializers.IntegerField(read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = ExamAttempt
@@ -224,8 +223,8 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
 
 class InstructorExamSerializer(serializers.ModelSerializer):
     questions = QuestionSerializer(many=True, read_only=True)
-    total_questions = serializers.IntegerField(source='total_questions', read_only=True)
-    total_points = serializers.IntegerField(source='total_points', read_only=True)
+    total_questions = serializers.IntegerField(read_only=True)
+    total_points = serializers.IntegerField(read_only=True)
     attempts_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -238,7 +237,7 @@ class InstructorExamSerializer(serializers.ModelSerializer):
             'total_questions', 'total_points', 'attempts_count',
             'created_at', 'updated_at', 'questions',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'questions', 'total_questions', 'total_points', 'attempts_count', 'created_at', 'updated_at']
 
     def get_attempts_count(self, obj):
         return obj.attempts.exclude(status='in_progress').count()

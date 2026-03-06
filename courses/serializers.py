@@ -44,7 +44,7 @@ class VideoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Video
         fields = [
-            'id', 'title', 'description', 'video_url', 'thumbnail',
+            'id', 'title', 'description', 'video_file', 'video_url', 'thumbnail',
             'duration', 'duration_formatted', 'order', 'is_free',
             'is_downloadable', 'views_count', 'attachments', 'is_watched'
         ]
@@ -76,8 +76,10 @@ class SectionSerializer(serializers.ModelSerializer):
         return obj.videos.count()
 
     def get_total_duration(self, obj):
-        # ✅ نستخدم الـ @property في الـ model مباشرة
-        return obj.total_duration
+        # حساب مجموع مدة الفيديوهات في هذا القسم
+        from django.db.models import Sum
+        total = obj.videos.aggregate(Sum('duration'))['duration__sum'] or 0
+        return total
 
 
 class CourseListSerializer(serializers.ModelSerializer):
