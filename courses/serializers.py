@@ -76,10 +76,8 @@ class SectionSerializer(serializers.ModelSerializer):
         return obj.videos.count()
 
     def get_total_duration(self, obj):
-        # حساب مجموع مدة الفيديوهات في هذا القسم
-        from django.db.models import Sum
-        total = obj.videos.aggregate(Sum('duration'))['duration__sum'] or 0
-        return total
+        # ✅ نستخدم الـ @property في الـ model مباشرة
+        return obj.total_duration
 
 
 class CourseListSerializer(serializers.ModelSerializer):
@@ -139,8 +137,6 @@ class CourseDetailSerializer(CourseListSerializer):
 
 
 class CourseReviewSerializer(serializers.ModelSerializer):
-    # ✅ إصلاح: student هنا هو User مش Student model
-    # فـ full_name مش موجودة - نستخدم get_full_name()
     student_name = serializers.SerializerMethodField()
     student_avatar = serializers.SerializerMethodField()
 
@@ -153,13 +149,14 @@ class CourseReviewSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_student_name(self, obj):
-        # ✅ obj.student هو User object
-        return obj.student.get_full_name() or obj.student.username
+        # obj.student هو Student model → .user هو User
+        user = obj.student.user if hasattr(obj.student, 'user') else obj.student
+        return user.get_full_name() or user.username
 
     def get_student_avatar(self, obj):
-        # ✅ User model عندك avatar field؟ لو مفيش نرجع None
         request = self.context.get('request')
-        avatar = getattr(obj.student, 'avatar', None)
+        user = obj.student.user if hasattr(obj.student, 'user') else obj.student
+        avatar = getattr(user, 'avatar', None)
         if avatar and request:
             try:
                 return request.build_absolute_uri(avatar.url)
@@ -206,37 +203,3 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data['instructor'] = self.context['request'].user
         return super().create(validated_data)
-
-
-# ═══════════════════════════════════════════════════
-#  Serializers لإدارة المحتوى - للمدرب
-# ═══════════════════════════════════════════════════
-
-class VideoWriteSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Video
-        fields = [
-            'id', 'title', 'description', 'video_url',
-            'duration', 'order', 'is_free', 'is_downloadable', 'section'
-        ]
-        read_only_fields = ['id']
-
-class VideoReadSerializer(serializers.ModelSerializer):
-    duration_formatted = serializers.SerializerMethodField()
-    class Meta:
-        model = Video
-        fields = [
-            'id', 'title', 'description', 'video_url',
-            'duration', 'duration_formatted', 'order',
-            'is_free', 'is_downloadable', 'views_count',
-            'section', 'created_at'
-        ]
-    def get_duration_formatted(self, obj):
-        return obj.duration_formatted
-
-class SectionWriteSerializer(serializers.ModelSerializer):
-    videos = VideoReadSerializer(many=True, read_only=True)
-    class Meta:
-        model = Section
-        fields = ['id', 'title', 'description', 'order', 'videos']
-        read_only_fields = ['id']

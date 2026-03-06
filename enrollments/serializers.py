@@ -11,13 +11,13 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     course_title = serializers.CharField(source='course.title', read_only=True)
     course_thumbnail = serializers.ImageField(source='course.thumbnail', read_only=True)
     course_instructor = serializers.CharField(source='course.instructor.username', read_only=True)
-    is_completed = serializers.BooleanField(read_only=True)
-    days_since_enrollment = serializers.IntegerField(read_only=True)
+    is_completed = serializers.BooleanField(source='is_completed', read_only=True)
+    days_since_enrollment = serializers.IntegerField(source='days_since_enrollment', read_only=True)
     
     class Meta:
         model = Enrollment
         fields = [
-            'id', 'course', 'student_name', 'course_title', 'course_thumbnail',
+            'id', 'student_name', 'course_title', 'course_thumbnail',
             'course_instructor', 'status', 'progress', 'total_time_spent',
             'certificate_issued', 'certificate_url', 'enrolled_at',
             'started_at', 'completed_at', 'last_accessed',

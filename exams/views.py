@@ -1,25 +1,36 @@
 """
 Views للامتحانات
+الطالب: يحل الامتحانات فقط - لا ينشئ ولا يعدل
 """
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
+from django.utils import timezone
 from django.db import transaction
-
+from django.core.cache import cache
+from datetime import timedelta
 from students.permissions import IsStudent
+from enrollments.models import Enrollment
 from .models import Exam, Question, Answer, ExamAttempt, StudentAnswer
-from .tasks import auto_submit_attempt
 from .serializers import (
     ExamSerializer, ExamDetailSerializer,
-    SubmitExamSerializer, ExamResultSerializer, ExamAttemptSerializer
+    ExamAttemptSerializer, ExamResultSerializer,
+    SubmitExamSerializer
 )
+from .permissions import (
+    IsEnrolledInCourse, HasAttemptsLeft,
+    IsAttemptOwner, IsAttemptInProgress
+)
+from .tasks import grade_exam_attempt, auto_submit_attempt
 
 
-# ═══════════════════════════════════════════════════
-#  STUDENT — قراءة وحل الامتحانات
-# ═══════════════════════════════════════════════════
 class ExamViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet للامتحانات
+    الطالب: مشاهدة وحل فقط (Read-Only على بيانات الامتحان)
+    """
     permission_classes = [IsAuthenticated, IsStudent]
 
     def get_serializer_class(self):
@@ -28,161 +39,282 @@ class ExamViewSet(viewsets.ReadOnlyModelViewSet):
         return ExamSerializer
 
     def get_queryset(self):
+        """
+        إظهار امتحانات الكورسات المسجل فيها الطالب فقط
+        """
         student = self.request.user.student_profile
-        # الامتحانات المتاحة للطالب (الكورسات المسجل فيها)
-        from enrollments.models import Enrollment
+
+        # الكورسات المسجل فيها الطالب
         enrolled_courses = Enrollment.objects.filter(
-            student=student, status='active'
+            student=student,
+            status='active'
         ).values_list('course_id', flat=True)
+
         return Exam.objects.filter(
             course__in=enrolled_courses,
             status='published'
-        ).select_related('course')
+        ).select_related('course').prefetch_related('questions__answers')
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        if self.request.user.is_authenticated and hasattr(self.request.user, 'student_profile'):
-            context['student'] = self.request.user.student_profile
+        context['request'] = self.request
         return context
 
-    # POST /exams/{id}/start/
-    @action(detail=True, methods=['post'])
-    def start(self, request, pk=None):
+    def retrieve(self, request, *args, **kwargs):
+        """عرض تفاصيل الامتحان مع كاش"""
         exam = self.get_object()
         student = request.user.student_profile
 
-        # التحقق من المحاولات المتبقية
-        attempts_used = ExamAttempt.objects.filter(
-            student=student, exam=exam
-        ).exclude(status='in_progress').count()
+        cache_key = f'exam_detail_{exam.id}_student_{student.id}'
+        cached = cache.get(cache_key)
 
-        if attempts_used >= exam.max_attempts:
-            return Response({'error': 'لقد استنفدت جميع محاولاتك'}, status=status.HTTP_400_BAD_REQUEST)
+        if cached:
+            return Response(cached)
 
-        # إنهاء أي محاولة سابقة في التقدم
-        ExamAttempt.objects.filter(student=student, exam=exam, status='in_progress').update(status='submitted')
+        serializer = ExamDetailSerializer(exam, context={'request': request})
+        data = serializer.data
 
+        # خلط الأسئلة لو مفعّل
+        if exam.shuffle_questions:
+            import random
+            questions = data.get('questions', [])
+            random.shuffle(questions)
+            data['questions'] = questions
+
+            if exam.shuffle_answers:
+                for question in data['questions']:
+                    random.shuffle(question['answers'])
+
+        cache.set(cache_key, data, 300)
+        return Response(data)
+
+    @action(detail=True, methods=['post'],
+            permission_classes=[IsAuthenticated, IsStudent,
+                                 IsEnrolledInCourse, HasAttemptsLeft])
+    def start(self, request, pk=None):
+        """
+        بدء محاولة امتحان جديدة
+        الطالب يبدأ الامتحان هنا
+        """
+        exam = self.get_object()
+        student = request.user.student_profile
+
+        # التحقق من عدم وجود محاولة جارية
+        active_attempt = ExamAttempt.objects.filter(
+            student=student,
+            exam=exam,
+            status='in_progress'
+        ).first()
+
+        if active_attempt:
+            if active_attempt.is_expired:
+                # تسليم تلقائي للمحاولة المنتهية
+                auto_submit_attempt.delay(active_attempt.id)
+            else:
+                # إرجاع المحاولة الجارية
+                serializer = ExamAttemptSerializer(active_attempt)
+                return Response({
+                    'message': 'لديك محاولة جارية بالفعل',
+                    'attempt': serializer.data
+                }, status=status.HTTP_200_OK)
+
+        # الحصول على التسجيل
+        enrollment = Enrollment.objects.get(
+            student=student,
+            course=exam.course,
+            status='active'
+        )
+
+        # حساب رقم المحاولة
+        attempt_number = ExamAttempt.objects.filter(
+            student=student,
+            exam=exam
+        ).count() + 1
+
+        # إنشاء المحاولة
         attempt = ExamAttempt.objects.create(
             student=student,
             exam=exam,
-            attempt_number=attempts_used + 1,
-            status='in_progress',
+            enrollment=enrollment,
+            attempt_number=attempt_number,
+            expires_at=timezone.now() + timedelta(minutes=exam.duration),
+            status='in_progress'
         )
 
+        serializer = ExamAttemptSerializer(attempt)
         return Response({
-            'attempt': ExamAttemptSerializer(attempt).data,
-            'exam': ExamDetailSerializer(exam, context=self.get_serializer_context()).data,
-            'time_limit_minutes': exam.duration,
+            'message': 'تم بدء الامتحان بنجاح',
+            'attempt': serializer.data,
+            'time_limit_minutes': exam.duration
         }, status=status.HTTP_201_CREATED)
 
-    # POST /exams/attempts/{attempt_id}/submit/
-    @action(detail=False, methods=['post'], url_path='attempts/(?P<attempt_id>[^/.]+)/submit')
+    @action(detail=False, methods=['post'],
+            url_path='attempts/(?P<attempt_id>[^/.]+)/submit',
+            permission_classes=[IsAuthenticated, IsStudent])
     def submit(self, request, attempt_id=None):
+        """
+        تسليم الامتحان
+        الطالب يسلم إجاباته هنا
+        """
         student = request.user.student_profile
+
         try:
-            attempt = ExamAttempt.objects.get(id=attempt_id, student=student)
+            attempt = ExamAttempt.objects.get(
+                id=attempt_id,
+                student=student
+            )
         except ExamAttempt.DoesNotExist:
-            return Response({'error': 'المحاولة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {'error': 'المحاولة غير موجودة'},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
+        # التحقق من الحالة
         if attempt.status != 'in_progress':
-            return Response({'error': 'هذه المحاولة تم تسليمها بالفعل'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'هذه المحاولة تم تسليمها بالفعل'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+        # التحقق من انتهاء الوقت
         if attempt.is_expired:
             auto_submit_attempt.delay(attempt.id)
-            return Response({'error': 'انتهى وقت الامتحان وتم التسليم تلقائياً'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'انتهى وقت الامتحان وتم التسليم تلقائياً'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+        # التحقق من البيانات
         serializer = SubmitExamSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         with transaction.atomic():
-            total_points = 0
-            earned_points = 0
+            # حفظ إجابات الطالب
+            for answer_data in serializer.validated_data['answers']:
+                question_id = answer_data['question_id']
+                answer_ids = answer_data['answer_ids']
 
-            for answer_data in serializer.validated_data.get('answers', []):
                 try:
-                    question = Question.objects.get(id=answer_data['question_id'], exam=attempt.exam)
-                    answers = Answer.objects.filter(id__in=answer_data['answer_ids'], question=question)
-                    correct_answers = question.answers.filter(is_correct=True)
+                    question = Question.objects.get(
+                        id=question_id,
+                        exam=attempt.exam
+                    )
+                    answers = Answer.objects.filter(
+                        id__in=answer_ids,
+                        question=question
+                    )
 
-                    selected_ids = set(answers.values_list('id', flat=True))
-                    correct_ids  = set(correct_answers.values_list('id', flat=True))
-                    is_correct   = selected_ids == correct_ids and bool(selected_ids)
-                    pts          = question.points if is_correct else 0
-
-                    student_answer = StudentAnswer.objects.create(
-                        attempt=attempt, question=question,
-                        is_correct=is_correct, points_earned=pts
+                    student_answer, created = StudentAnswer.objects.get_or_create(
+                        attempt=attempt,
+                        question=question
                     )
                     student_answer.selected_answers.set(answers)
+                    student_answer.save()
 
-                    total_points  += question.points
-                    earned_points += pts
                 except Question.DoesNotExist:
                     continue
 
-            # حساب الدرجة
-            score = (earned_points / total_points * 100) if total_points > 0 else 0
-            passed = score >= attempt.exam.passing_score
-
-            attempt.status        = 'graded'
-            attempt.score         = score
-            attempt.points_earned = earned_points
-            attempt.passed        = passed
+            # تحديث حالة المحاولة
+            attempt.status = 'submitted'
+            attempt.submitted_at = timezone.now()
             attempt.save()
 
-        return Response({
-            'score': round(score, 1),
-            'passed': passed,
-            'points_earned': earned_points,
-            'total_points': total_points,
-            'attempt_id': attempt.id,
-        })
+        # تصحيح الامتحان في الخلفية
+        grade_exam_attempt.delay(attempt.id)
 
-    # GET /exams/attempts/{attempt_id}/result/
-    @action(detail=False, methods=['get'], url_path='attempts/(?P<attempt_id>[^/.]+)/result')
+        return Response({
+            'message': 'تم تسليم الامتحان بنجاح',
+            'attempt_id': attempt.id
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'],
+            url_path='attempts/(?P<attempt_id>[^/.]+)/result',
+            permission_classes=[IsAuthenticated, IsStudent])
     def result(self, request, attempt_id=None):
+        """
+        عرض نتيجة محاولة
+        """
         student = request.user.student_profile
+
         try:
-            attempt = ExamAttempt.objects.get(id=attempt_id, student=student)
+            attempt = ExamAttempt.objects.get(
+                id=attempt_id,
+                student=student
+            )
         except ExamAttempt.DoesNotExist:
-            return Response({'error': 'المحاولة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {'error': 'المحاولة غير موجودة'},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         if attempt.status not in ['graded', 'submitted']:
-            return Response({'error': 'النتيجة غير جاهزة بعد'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'النتيجة غير جاهزة بعد'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        return Response(ExamResultSerializer(attempt, context={'request': request}).data)
+        serializer = ExamResultSerializer(attempt, context={'request': request})
+        return Response(serializer.data)
 
-    # GET /exams/my_attempts/
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'],
+            permission_classes=[IsAuthenticated, IsStudent])
     def my_attempts(self, request):
+        """
+        جميع محاولات الطالب
+        """
         student = request.user.student_profile
+
         attempts = ExamAttempt.objects.filter(
             student=student
-        ).select_related('exam__course').order_by('-started_at')
-        return Response(ExamAttemptSerializer(attempts, many=True).data)
+        ).select_related('exam', 'exam__course').order_by('-started_at')
 
-    # GET /exams/{id}/my_stats/
-    @action(detail=True, methods=['get'])
+        # فلترة حسب الامتحان
+        exam_id = request.query_params.get('exam_id')
+        if exam_id:
+            attempts = attempts.filter(exam_id=exam_id)
+
+        serializer = ExamAttemptSerializer(attempts, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'],
+            permission_classes=[IsAuthenticated, IsStudent])
     def my_stats(self, request, pk=None):
+        """
+        إحصائيات الطالب في امتحان معين
+        """
         exam = self.get_object()
         student = request.user.student_profile
+
         attempts = ExamAttempt.objects.filter(
-            student=student, exam=exam
-        ).exclude(status='in_progress').order_by('-started_at')
+            student=student,
+            exam=exam
+        ).exclude(status='in_progress')
+
+        if not attempts.exists():
+            return Response({'message': 'لا توجد محاولات سابقة'})
+
         best = attempts.order_by('-score').first()
-        return Response({
-            'attempts_used': attempts.count(),
-            'attempts_left': max(0, exam.max_attempts - attempts.count()),
-            'best_score': best.score if best else None,
-            'passed': best.passed if best else False,
-            'last_attempt': ExamAttemptSerializer(attempts.first()).data if attempts.exists() else None,
-        })
+        latest = attempts.order_by('-started_at').first()
+
+        stats = {
+            'total_attempts': attempts.count(),
+            'attempts_left': exam.max_attempts - attempts.count(),
+            'best_score': float(best.score) if best.score else 0,
+            'best_passed': best.passed,
+            'latest_score': float(latest.score) if latest.score else 0,
+            'average_score': float(
+                attempts.filter(score__isnull=False).aggregate(
+                    models.Avg('score')
+                )['score__avg'] or 0
+            ),
+            'passed_count': attempts.filter(passed=True).count(),
+        }
+
+        return Response(stats)
 
 
-# ═══════════════════════════════════════════════════
-#  INSTRUCTOR — إدارة الامتحانات والنتائج
-# ═══════════════════════════════════════════════════
 class InstructorExamViewSet(viewsets.ModelViewSet):
+    """ViewSet للمدرب - إدارة الامتحانات كاملة"""
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
@@ -193,61 +325,58 @@ class InstructorExamViewSet(viewsets.ModelViewSet):
         return Exam.objects.filter(
             course__instructor=self.request.user
         ).select_related('course').prefetch_related(
-            'questions__answers'
+            'questions__answers', 'attempts'
         ).order_by('-created_at')
 
     def perform_create(self, serializer):
         serializer.save()
 
-    # ── نشر / سحب الامتحان ──
-    @action(detail=True, methods=['post'], url_path='publish')
-    def publish(self, request, pk=None):
-        exam = self.get_object()
-        exam.status = 'published' if exam.status != 'published' else 'draft'
-        exam.save()
-        return Response({'status': exam.status, 'message': 'تم تحديث حالة الامتحان ✅'})
-
-    # ── إضافة سؤال ──
+    # ── إضافة سؤال لامتحان ──
     @action(detail=True, methods=['post'], url_path='questions')
     def add_question(self, request, pk=None):
-        from .serializers import QuestionWriteSerializer, QuestionSerializer
+        from .serializers import QuestionWriteSerializer
         exam = self.get_object()
+        data = {**request.data, 'exam': exam.id}
         serializer = QuestionWriteSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             question = serializer.save(exam=exam)
+            from .serializers import QuestionSerializer
             return Response(QuestionSerializer(question).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # ── تعديل / حذف سؤال ──
+    # ── تعديل سؤال ──
     @action(detail=True, methods=['patch', 'delete'], url_path='questions/(?P<question_id>[^/.]+)')
     def manage_question(self, request, pk=None, question_id=None):
-        from .serializers import QuestionWriteSerializer, QuestionSerializer
         exam = self.get_object()
         try:
             question = Question.objects.get(id=question_id, exam=exam)
         except Question.DoesNotExist:
             return Response({'error': 'السؤال غير موجود'}, status=status.HTTP_404_NOT_FOUND)
+
         if request.method == 'DELETE':
             question.delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
+
+        from .serializers import QuestionWriteSerializer
         serializer = QuestionWriteSerializer(question, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            from .serializers import QuestionSerializer
             return Response(QuestionSerializer(question).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # ── نتائج الطلاب ──
+    # ── نتائج الطلاب في امتحان ──
     @action(detail=True, methods=['get'], url_path='results')
     def results(self, request, pk=None):
         from .serializers import InstructorAttemptSerializer
         exam = self.get_object()
         attempts = ExamAttempt.objects.filter(
             exam=exam
-        ).exclude(status='in_progress').select_related('student__user').prefetch_related(
-            'student_answers__selected_answers',
-            'student_answers__question__answers'
-        ).order_by('-score')
-        return Response(InstructorAttemptSerializer(attempts, many=True).data)
+        ).exclude(status='in_progress').select_related(
+            'student__user'
+        ).prefetch_related('student_answers__selected_answers', 'student_answers__question__answers').order_by('-score')
+        serializer = InstructorAttemptSerializer(attempts, many=True)
+        return Response(serializer.data)
 
     # ── تفاصيل محاولة طالب ──
     @action(detail=True, methods=['get'], url_path='results/(?P<attempt_id>[^/.]+)')
@@ -255,29 +384,10 @@ class InstructorExamViewSet(viewsets.ModelViewSet):
         from .serializers import InstructorAttemptSerializer
         exam = self.get_object()
         try:
-            attempt = ExamAttempt.objects.select_related('student__user').prefetch_related(
-                'student_answers__selected_answers',
-                'student_answers__question__answers'
-            ).get(id=attempt_id, exam=exam)
+            attempt = ExamAttempt.objects.get(
+                id=attempt_id, exam=exam
+            ).select_related('student__user')
         except ExamAttempt.DoesNotExist:
             return Response({'error': 'المحاولة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(InstructorAttemptSerializer(attempt).data)
-
-    # ── إحصائيات الامتحان ──
-    @action(detail=True, methods=['get'], url_path='stats')
-    def exam_stats(self, request, pk=None):
-        exam = self.get_object()
-        attempts = ExamAttempt.objects.filter(exam=exam).exclude(status='in_progress')
-        total = attempts.count()
-        passed = attempts.filter(passed=True).count()
-        scores = list(attempts.values_list('score', flat=True))
-        avg = sum(float(s) for s in scores) / len(scores) if scores else 0
-        return Response({
-            'total_attempts': total,
-            'passed': passed,
-            'failed': total - passed,
-            'pass_rate': round(passed / total * 100, 1) if total else 0,
-            'average_score': round(avg, 1),
-            'highest_score': max((float(s) for s in scores), default=0),
-            'lowest_score': min((float(s) for s in scores), default=0),
-        })
+        serializer = InstructorAttemptSerializer(attempt)
+        return Response(serializer.data)

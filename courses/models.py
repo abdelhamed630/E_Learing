@@ -225,10 +225,11 @@ class Video(models.Model):
     description = models.TextField(blank=True, null=True, verbose_name='الوصف')
     video_file = models.FileField(
         upload_to='videos/files/',
-        blank=True, null=True,
+        blank=True,
+        null=True,
         verbose_name='ملف الفيديو'
     )
-    video_url = models.URLField(blank=True, null=True, verbose_name='رابط الفيديو الخارجي')
+    video_url = models.URLField(blank=True, null=True, verbose_name='رابط الفيديو')
     thumbnail = models.ImageField(
         upload_to='videos/thumbnails/',
         blank=True,

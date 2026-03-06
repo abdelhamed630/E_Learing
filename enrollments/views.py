@@ -66,14 +66,12 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         
         student = request.user.student_profile
         
-        # التحقق من التسجيل السابق - لو مسجل يرجع success
-        existing = Enrollment.objects.filter(student=student, course=course).first()
-        if existing:
-            return Response({
-                'message': 'أنت مسجل بالفعل في هذا الكورس',
-                'enrollment': EnrollmentSerializer(existing).data,
-                'already_enrolled': True
-            }, status=status.HTTP_200_OK)
+        # التحقق من التسجيل السابق
+        if Enrollment.objects.filter(student=student, course=course).exists():
+            return Response(
+                {'error': 'أنت مسجل بالفعل في هذا الكورس'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         # إنشاء التسجيل
         enrollment = Enrollment.objects.create(
@@ -364,27 +362,3 @@ class CertificateViewSet(viewsets.ReadOnlyModelViewSet):
                 'valid': False,
                 'message': 'شهادة غير صالحة'
             }, status=status.HTTP_404_NOT_FOUND)
-
-
-class InstructorEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    المدرب يشوف تسجيلات طلابه في كورساته
-    """
-    permission_classes = [IsAuthenticated]
-    serializer_class = None
-
-    def get_serializer_class(self):
-        return EnrollmentSerializer
-
-    def get_queryset(self):
-        return Enrollment.objects.filter(
-            course__instructor=self.request.user
-        ).select_related(
-            'course', 'student__user'
-        ).order_by('-enrolled_at')
-
-    @action(detail=False, methods=['get'], url_path='by-course/(?P<course_id>[^/.]+)')
-    def by_course(self, request, course_id=None):
-        qs = self.get_queryset().filter(course_id=course_id)
-        serializer = self.get_serializer(qs, many=True)
-        return Response(serializer.data)
