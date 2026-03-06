@@ -362,3 +362,44 @@ class CertificateViewSet(viewsets.ReadOnlyModelViewSet):
                 'valid': False,
                 'message': 'شهادة غير صالحة'
             }, status=status.HTTP_404_NOT_FOUND)
+
+
+# ─────────────────────────────────────────────────────────────
+#  INSTRUCTOR ENROLLMENTS - طلاب المدرب
+# ─────────────────────────────────────────────────────────────
+from rest_framework.decorators import api_view
+@api_view(['GET'])
+def instructor_enrollments(request):
+    """جميع الطلاب المسجلين في كورسات المدرب"""
+    if not request.user.is_authenticated or request.user.role != 'instructor':
+        from rest_framework.response import Response as R
+        return R({'error': 'غير مصرح'}, status=403)
+    
+    enrollments = Enrollment.objects.filter(
+        course__instructor=request.user
+    ).select_related('student__user', 'course').order_by('-enrolled_at')
+    
+    # pagination يدوي
+    limit = int(request.query_params.get('limit', 50))
+    offset = int(request.query_params.get('offset', 0))
+    total = enrollments.count()
+    page = enrollments[offset:offset+limit]
+    
+    data = []
+    for e in page:
+        data.append({
+            'id': e.id,
+            'student': e.student.id,
+            'student_name': e.student.user.get_full_name() or e.student.user.username,
+            'student_email': e.student.user.email,
+            'course': e.course.id,
+            'course_title': e.course.title,
+            'progress': e.progress,
+            'progress_percentage': e.progress,
+            'status': e.status,
+            'is_completed': e.is_completed,
+            'enrolled_at': e.enrolled_at,
+            'last_accessed': e.last_accessed,
+        })
+    
+    return Response({'count': total, 'results': data})

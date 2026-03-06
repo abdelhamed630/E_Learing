@@ -6,7 +6,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     CategoryViewSet, CourseViewSet, VideoViewSet,
     InstructorCourseViewSet, InstructorContentViewSet,
-    get_video_token
+    get_video_token, stream_video
 )
 
 app_name = 'courses'
@@ -66,4 +66,7 @@ urlpatterns = [
     path('video-token/<int:video_id>/',
          get_video_token,
          name='video-token'),
+    path('video-token/<int:video_id>/stream/',
+         stream_video,
+         name='video-stream'),
 ]

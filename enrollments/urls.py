@@ -7,7 +7,8 @@ from .views import (
     EnrollmentViewSet,
     VideoProgressViewSet,
     CourseNoteViewSet,
-    CertificateViewSet
+    CertificateViewSet,
+    instructor_enrollments
 )
 
 app_name = 'enrollments'
@@ -20,4 +21,5 @@ router.register(r'certificates', CertificateViewSet, basename='certificate')
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('instructor-enrollments/', instructor_enrollments, name='instructor-enrollments'),
 ]

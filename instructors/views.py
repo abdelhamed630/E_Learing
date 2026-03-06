@@ -45,3 +45,26 @@ class InstructorViewSet(viewsets.ReadOnlyModelViewSet):
             context={'request': request}
         )
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get', 'patch'], permission_classes=[])
+    def me(self, request):
+        """ملف المدرب الحالي - قراءة وتعديل"""
+        from rest_framework.permissions import IsAuthenticated
+        if not request.user.is_authenticated:
+            return Response({'error': 'يجب تسجيل الدخول'}, status=401)
+        
+        try:
+            instructor = Instructor.objects.get(user=request.user)
+        except Instructor.DoesNotExist:
+            # إنشاء تلقائي لو مفيش
+            instructor = Instructor.objects.create(user=request.user)
+        
+        if request.method == 'PATCH':
+            serializer = InstructorSerializer(instructor, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data)
+            return Response(serializer.errors, status=400)
+        
+        serializer = InstructorSerializer(instructor)
+        return Response(serializer.data)

@@ -6,9 +6,8 @@ from rest_framework import viewsets, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, models as django_models
 from django.core.cache import cache
 from datetime import timedelta
 from students.permissions import IsStudent
@@ -304,7 +303,7 @@ class ExamViewSet(viewsets.ReadOnlyModelViewSet):
             'latest_score': float(latest.score) if latest.score else 0,
             'average_score': float(
                 attempts.filter(score__isnull=False).aggregate(
-                    models.Avg('score')
+                    django_models.Avg('score')
                 )['score__avg'] or 0
             ),
             'passed_count': attempts.filter(passed=True).count(),
@@ -329,7 +328,52 @@ class InstructorExamViewSet(viewsets.ModelViewSet):
         ).order_by('-created_at')
 
     def perform_create(self, serializer):
+        # التحقق إن الـ course تاعت المدرب
+        course_id = self.request.data.get('course')
+        if course_id:
+            from courses.models import Course
+            try:
+                course = Course.objects.get(pk=course_id, instructor=self.request.user)
+            except Course.DoesNotExist:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('هذا الكورس ليس من كورساتك')
         serializer.save()
+
+    # ── نشر / إلغاء نشر الامتحان ──
+    @action(detail=True, methods=['post'], url_path='publish')
+    def publish(self, request, pk=None):
+        exam = self.get_object()
+        if exam.status == 'published':
+            exam.status = 'draft'
+            msg = 'تم إلغاء نشر الامتحان'
+        else:
+            if not exam.questions.exists():
+                return Response(
+                    {'error': 'لا يمكن نشر امتحان بدون أسئلة'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            exam.status = 'published'
+            msg = 'تم نشر الامتحان بنجاح'
+        exam.save()
+        return Response({'message': msg, 'status': exam.status})
+
+    # ── إحصائيات الامتحان ──
+    @action(detail=True, methods=['get'], url_path='stats')
+    def stats(self, request, pk=None):
+        exam = self.get_object()
+        attempts = ExamAttempt.objects.filter(exam=exam).exclude(status='in_progress')
+        passed = attempts.filter(passed=True).count()
+        total  = attempts.count()
+        scores = [float(a.score or 0) for a in attempts]
+        return Response({
+            'total_attempts': total,
+            'passed':         passed,
+            'failed':         total - passed,
+            'pass_rate':      round(passed / total * 100, 1) if total else 0,
+            'avg_score':      round(sum(scores) / len(scores), 1) if scores else 0,
+            'max_score':      max(scores) if scores else 0,
+            'min_score':      min(scores) if scores else 0,
+        })
 
     # ── إضافة سؤال لامتحان ──
     @action(detail=True, methods=['post'], url_path='questions')

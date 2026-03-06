@@ -198,10 +198,15 @@ class Section(models.Model):
         verbose_name = 'قسم'
         verbose_name_plural = 'الأقسام'
         ordering = ['course', 'order']
-        unique_together = ['course', 'order']
     
     def __str__(self):
         return f"{self.course.title} - {self.title}"
+
+    @property
+    def total_duration(self):
+        """إجمالي مدة الفيديوهات في القسم بالثواني"""
+        from django.db.models import Sum
+        return self.videos.aggregate(Sum('duration'))['duration__sum'] or 0
 
 
 class Video(models.Model):
