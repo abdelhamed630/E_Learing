@@ -69,16 +69,10 @@ TEMPLATES = [
 WSGI_APPLICATION = 'E_Learning.wsgi.application'
 
 # ── Database ────────────────────────────────────────────────────────
+import dj_database_url
+
 DATABASES = {
-    'default': {
-        'ENGINE': os.getenv('DATABASE_ENGINE', 'django.db.backends.postgresql'),
-        'NAME': os.getenv('DATABASE_NAME', 'elearning'),
-        'USER': os.getenv('DATABASE_USER', 'elearning'),
-        'PASSWORD': os.getenv('DATABASE_PASSWORD', 'password'),
-        'HOST': os.getenv('DATABASE_HOST', 'db'),
-        'PORT': os.getenv('DATABASE_PORT', '5432'),
-        'CONN_MAX_AGE': 60,
-    }
+    'default': dj_database_url.parse(os.environ.get('DATABASE_URL'))
 }
 
 AUTH_PASSWORD_VALIDATORS = [
@@ -152,8 +146,8 @@ DEFAULT_FROM_EMAIL  = os.getenv(
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 
 # ── Celery ──────────────────────────────────────────────────────────
-CELERY_BROKER_URL     = os.getenv('CELERY_BROKER_URL', 'redis://redis:6379/0')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://redis:6379/0')
+CELERY_BROKER_URL     = os.getenv('REDIS_URL', 'redis://redis:6379/0')
+CELERY_RESULT_BACKEND = os.getenv('REDIS_URL', 'redis://redis:6379/0')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_TIMEZONE       = TIME_ZONE
@@ -175,7 +169,7 @@ else:
     CACHES = {
         'default': {
             'BACKEND': 'django_redis.cache.RedisCache',
-            'LOCATION': os.getenv('REDIS_URL', 'redis://redis:6379/1'),
+            'LOCATION': os.getenv('REDIS_URL', 'redis://redis:6379/0'),
             'TIMEOUT': 300,
             'OPTIONS': {
                 'CLIENT_CLASS': 'django_redis.client.DefaultClient',

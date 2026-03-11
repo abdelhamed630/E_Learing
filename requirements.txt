@@ -9,3 +9,5 @@ redis==5.2.1
 psycopg2-binary==2.9.7
 django-celery-beat==2.5.0
 django-redis==5.4.0
+gunicorn==21.2.0
+dj-database-url==2.1.0
